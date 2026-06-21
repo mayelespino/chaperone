@@ -1,0 +1,13 @@
+[Unit]
+Description=Chaperon API
+After=network.target
+
+[Service]
+Environment=TZ=America/Los_Angeles
+WorkingDirectory=/home/pi/chaperon-api
+ExecStart=/usr/bin/python3 -u /home/pi/chaperon-api/chaperon-api.py
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target

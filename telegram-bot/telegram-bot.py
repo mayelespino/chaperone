@@ -42,19 +42,23 @@ session = requests.Session()
 # frequent empty round trips to Telegram while idle.
 POLL_TIMEOUT = 10
 
+# chaperon-api.py's scheduling endpoint -- used by the @check command
+# to schedule a future ?ok? trigger instead of running one right now.
+CHAPERON_API_URL = "http://localhost:8001/checks"
 
-def ping():
-    return "PONG@chap"
+# chaperon-api.py's crontab endpoint -- used by the @crontab command.
+CHAPERON_API_CRONTAB_URL = "http://localhost:8001/crontab"
 
 
-def echo():
-    return "ECHO"
+def ping(parameters, update):
+    send("PONG@chap")
 
 
-COMMANDS = {
-    "/ping": ping(),
-    "/echo": echo(),
-}
+def echo(parameters, update):
+    first_name = update.get("message", {}).get("from", {}).get("first_name", "")
+    last_name = update.get("message", {}).get("from", {}).get("last_name", "")
+    send(f"{first_name} {last_name}: {' '.join(parameters)}")
+
 
 ######################################################################
 # Telegram helpers
@@ -86,6 +90,45 @@ def send_notification_email():
             server.send_message(msg)
     except Exception as e:
         print(f"send_notification_email() failed: {e}")
+
+
+def schedule_check_via_api(hour, minute):
+    """Asks chaperon-api.py to schedule a future ?ok? trigger. Returns (ok, message)."""
+    try:
+        r = session.post(CHAPERON_API_URL, json={"hour": hour, "minute": minute}, timeout=10)
+    except requests.exceptions.RequestException as e:
+        return False, f"Could not reach chaperon-api: {e}"
+
+    try:
+        data = r.json()
+    except ValueError:
+        return False, f"Unexpected response from chaperon-api: {r.text}"
+
+    if not r.ok:
+        return False, str(data.get("detail", data))
+
+    return True, f"Check scheduled for {data.get('scheduled_for')}."
+
+
+def fetch_crontab_via_api():
+    """Asks chaperon-api.py for the crontab contents. Returns text to send back."""
+    try:
+        r = session.get(CHAPERON_API_CRONTAB_URL, timeout=10)
+    except requests.exceptions.RequestException as e:
+        return f"Could not reach chaperon-api: {e}"
+
+    try:
+        data = r.json()
+    except ValueError:
+        return f"Unexpected response from chaperon-api: {r.text}"
+
+    if not r.ok:
+        return str(data.get("detail", data))
+
+    content = data.get("crontab", "")
+    if not content.strip():
+        return data.get("message", "Crontab is empty.")
+    return content
 
 
 def get_updates():
@@ -149,6 +192,76 @@ def confirm_and_report():
         send(f"Error: {e}")
 
 
+def confirm(parameters, update):
+    confirm_and_report()
+
+
+def check(parameters, update):
+    if not parameters:
+        send("Usage: @check HH:MM")
+        return
+    try:
+        hour_str, minute_str = parameters[0].split(":")
+        hour, minute = int(hour_str), int(minute_str)
+    except ValueError:
+        send("Invalid time format. Use @check HH:MM (e.g. @check 15:30).")
+        return
+    _, message = schedule_check_via_api(hour, minute)
+    send(message)
+
+
+def crontab(parameters, update):
+    send(fetch_crontab_via_api())
+
+
+HELP_TEXT = (
+    "Available commands:\n"
+    "\n"
+    "/ping\n"
+    "  No parameters.\n"
+    "  Replies with PONG@chap.\n"
+    "  Example: /ping\n"
+    "\n"
+    "/echo <text>\n"
+    "  Replies with your name and whatever text follows the command.\n"
+    "  Example: /echo hello there\n"
+    "\n"
+    "?ok?\n"
+    "  Starts the confirmation flow directly in this chat -- asks for a\n"
+    "  yes/no reply and waits for one of: y, yes, si, 1\n"
+    "  Example: ?ok?\n"
+    "\n"
+    "@check HH:MM\n"
+    "  Schedules a one-time confirmation check for that time today,\n"
+    "  via chaperon-api.\n"
+    "  Example: @check 15:30\n"
+    "\n"
+    "@crontab\n"
+    "  No parameters.\n"
+    "  Shows the contents of this Pi's crontab, via chaperon-api.\n"
+    "  Example: @crontab\n"
+    "\n"
+    "/help\n"
+    "  No parameters.\n"
+    "  Shows this help screen.\n"
+    "  Example: /help"
+)
+
+
+def help_command(parameters, update):
+    send(HELP_TEXT)
+
+
+COMMANDS = {
+    "/ping": ping,
+    "/echo": echo,
+    "?ok?": confirm,
+    "@check": check,
+    "@crontab": crontab,
+    "/help": help_command,
+}
+
+
 ######################################################################
 # Local HTTP trigger -- 127.0.0.1 only, lets telegram-cron.py (or curl)
 # kick off the ?ok? flow without sending a Telegram message at all.
@@ -194,21 +307,8 @@ while True:
         command = text.split()[0] if text else ""
         parameters = text.split()[1:] if len(text.split()) > 1 else []
 
-        if command == "?ok?":
-            confirm_and_report()
-        elif command in COMMANDS:
+        if command in COMMANDS:
             try:
-                result = COMMANDS[command]
-                if result == "ECHO":
-                    echoString = (
-                        update.get("message", {}).get("from", {}).get("first_name", "")
-                        + " "
-                        + update.get("message", {}).get("from", {}).get("last_name", "")
-                        + ": "
-                        + " ".join(parameters)
-                    )
-                    send(echoString)
-                else:
-                    send(result)
+                COMMANDS[command](parameters, update)
             except Exception as e:
                 send(f"Error: {e}")
