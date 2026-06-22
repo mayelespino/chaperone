@@ -28,6 +28,8 @@ SMTP_USERNAME = config["email"]["smtp_username"]
 SMTP_PASSWORD = config["email"]["smtp_password"]
 offset = 0
 no_confirmation_count = 0
+last_bot_message = ""
+last_media = None
 
 VALID_CONFIRMATIONS = {"y", "yes", "si", "1"}
 
@@ -66,6 +68,8 @@ def echo(parameters, update):
 
 
 def send(text):
+    global last_bot_message
+    last_bot_message = text
     try:
         session.post(
             f"https://api.telegram.org/bot{TOKEN}/sendMessage",
@@ -76,20 +80,61 @@ def send(text):
         print(f"send() failed: {e}")
 
 
-def send_notification_email():
+def send_email(subject, body, attachment=None):
+    """attachment, if given: {"filename": ..., "mime_type": "type/subtype", "data": bytes}"""
     msg = EmailMessage()
-    msg["Subject"] = "Chaperon Notification"
+    msg["Subject"] = subject
     msg["From"] = SMTP_USERNAME
     msg["To"] = NOTIFY_EMAIL
-    msg.set_content(NOTIFY_MESSAGE)
+    msg.set_content(body)
+
+    if attachment:
+        maintype, subtype = attachment["mime_type"].split("/", 1)
+        msg.add_attachment(
+            attachment["data"],
+            maintype=maintype,
+            subtype=subtype,
+            filename=attachment["filename"],
+        )
 
     try:
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
             server.starttls()
             server.login(SMTP_USERNAME, SMTP_PASSWORD)
             server.send_message(msg)
+        return True, None
     except Exception as e:
-        print(f"send_notification_email() failed: {e}")
+        return False, str(e)
+
+
+def download_telegram_file(file_id):
+    """Fetches a file's bytes from Telegram given its file_id. Returns (bytes, None) or (None, error)."""
+    try:
+        r = session.get(
+            f"https://api.telegram.org/bot{TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=10,
+        )
+        data = r.json()
+        if not data.get("ok", False):
+            return None, str(data)
+        file_path = data["result"]["file_path"]
+
+        file_r = session.get(
+            f"https://api.telegram.org/file/bot{TOKEN}/{file_path}",
+            timeout=20,
+        )
+        if not file_r.ok:
+            return None, f"Download failed: {file_r.status_code}"
+        return file_r.content, None
+    except requests.exceptions.RequestException as e:
+        return None, str(e)
+
+
+def send_notification_email():
+    ok, error = send_email("Chaperon Notification", NOTIFY_MESSAGE)
+    if not ok:
+        print(f"send_notification_email() failed: {error}")
 
 
 def schedule_check_via_api(hour, minute):
@@ -214,6 +259,38 @@ def crontab(parameters, update):
     send(fetch_crontab_via_api())
 
 
+def location(parameters, update):
+    send(
+        "Please tap the attachment icon (\U0001F4CE) in the message box and "
+        "choose 'Location' to share your location."
+    )
+
+
+def send_command(parameters, update):
+    global last_media
+    if last_media:
+        file_bytes, error = download_telegram_file(last_media["file_id"])
+        if file_bytes is None:
+            send(f"Failed to download attachment: {error}")
+            return
+        extension = last_media["mime_type"].split("/")[-1]
+        filename = f"{last_media['type']}.{extension}"
+        ok, error = send_email(
+            "Chaperon Attachment",
+            f"Attached {last_media['type']} from Telegram.",
+            attachment={"filename": filename, "mime_type": last_media["mime_type"], "data": file_bytes},
+        )
+        last_media = None
+        send("Sent to email as an attachment." if ok else f"Failed to send email: {error}")
+        return
+
+    if not last_bot_message:
+        send("Nothing to send yet.")
+        return
+    ok, error = send_email("Chaperon Message", last_bot_message)
+    send("Sent to email." if ok else f"Failed to send email: {error}")
+
+
 HELP_TEXT = (
     "Available commands:\n"
     "\n"
@@ -241,6 +318,18 @@ HELP_TEXT = (
     "  Shows the contents of this Pi's crontab, via chaperon-api.\n"
     "  Example: @crontab\n"
     "\n"
+    "/location\n"
+    "  No parameters.\n"
+    "  Tells you how to share your location via Telegram's attachment menu.\n"
+    "  Example: /location\n"
+    "\n"
+    "/send\n"
+    "  No parameters.\n"
+    "  Emails the most recently shared voice message or photo as an\n"
+    "  attachment, or falls back to emailing the bot's last text reply\n"
+    "  if nothing's pending.\n"
+    "  Example: record a voice message, then /send\n"
+    "\n"
     "/help\n"
     "  No parameters.\n"
     "  Shows this help screen.\n"
@@ -258,6 +347,8 @@ COMMANDS = {
     "?ok?": confirm,
     "@check": check,
     "@crontab": crontab,
+    "/location": location,
+    "/send": send_command,
     "/help": help_command,
 }
 
@@ -303,6 +394,30 @@ while True:
         msg = update.get("message", {})
         if msg.get("chat", {}).get("id") != CHAT_ID:
             continue
+
+        location_data = msg.get("location")
+        if location_data:
+            lat, lon = location_data.get("latitude"), location_data.get("longitude")
+            send(f"Location received: {lat}, {lon} -- https://maps.google.com/?q={lat},{lon}")
+            continue
+
+        voice_data = msg.get("voice")
+        if voice_data:
+            last_media = {
+                "type": "voice",
+                "file_id": voice_data["file_id"],
+                "mime_type": voice_data.get("mime_type", "audio/ogg"),
+            }
+            send("Voice message received. Type /send to email it as an attachment.")
+            continue
+
+        photo_data = msg.get("photo")
+        if photo_data:
+            largest = photo_data[-1]  # photo sizes are ordered smallest to largest
+            last_media = {"type": "photo", "file_id": largest["file_id"], "mime_type": "image/jpeg"}
+            send("Photo received. Type /send to email it as an attachment.")
+            continue
+
         text = msg.get("text", "").strip().lower()
         command = text.split()[0] if text else ""
         parameters = text.split()[1:] if len(text.split()) > 1 else []
