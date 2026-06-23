@@ -1,4 +1,3 @@
-````markdown
 # Telegram Chaperon Bot
 
 ## What is this?
