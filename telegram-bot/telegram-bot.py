@@ -20,8 +20,12 @@ CHAT_ID = int(config["telegram"]["chat_id"])
 CONFIRMATION_WAIT_SECONDS = int(config["chaperon"]["wait_time"])
 RETRY_SLEEP_SECONDS = int(config["chaperon"]["sleep_time"])
 MAX_RETRIES = int(config["chaperon"]["max_retries"])
+NOTIFY_SUBJECT = config["chaperon"]["notify_subject"]
 NOTIFY_EMAIL = config["chaperon"]["notify_email"]
 NOTIFY_MESSAGE = config["chaperon"]["notify_message"]
+TEST_NOTIFY_SUBJECT = config["chaperon"]["test_notify_subject"]
+TEST_NOTIFY_EMAIL = config["chaperon"]["test_notify_email"]
+TEST_NOTIFY_MESSAGE = config["chaperon"]["test_notify_message"]
 SMTP_SERVER = config["email"]["smtp_server"]
 SMTP_PORT = int(config["email"]["smtp_port"])
 SMTP_USERNAME = config["email"]["smtp_username"]
@@ -80,12 +84,12 @@ def send(text):
         print(f"send() failed: {e}")
 
 
-def send_email(subject, body, attachment=None):
+def send_email(subject, body, to=None, attachment=None):
     """attachment, if given: {"filename": ..., "mime_type": "type/subtype", "data": bytes}"""
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = SMTP_USERNAME
-    msg["To"] = NOTIFY_EMAIL
+    msg["To"] = to or NOTIFY_EMAIL
     msg.set_content(body)
 
     if attachment:
@@ -132,7 +136,7 @@ def download_telegram_file(file_id):
 
 
 def send_notification_email():
-    ok, error = send_email("Chaperon Notification", NOTIFY_MESSAGE)
+    ok, error = send_email(NOTIFY_SUBJECT, NOTIFY_MESSAGE)
     if not ok:
         print(f"send_notification_email() failed: {error}")
 
@@ -266,29 +270,61 @@ def location(parameters, update):
     )
 
 
-def send_command(parameters, update):
+def _do_send(subject, to, extra_message, fallback_body):
+    """Shared logic for /send and /send-test.
+    extra_message: text the user explicitly typed after the command (may be empty).
+    fallback_body: always appended to the body when media is pending; used as
+                   the sole body when nothing is pending and no extra_message given."""
     global last_media
     if last_media:
+        if last_media["type"] == "location":
+            body = last_media["text"]
+            if fallback_body:
+                body = f"{body}\n\n{fallback_body}"
+            if extra_message:
+                body = f"{body}\n\n{extra_message}"
+            last_media = None
+            ok, error = send_email(subject, body, to=to)
+            send("Location sent to email." if ok else f"Failed to send email: {error}")
+            return
+
         file_bytes, error = download_telegram_file(last_media["file_id"])
         if file_bytes is None:
             send(f"Failed to download attachment: {error}")
             return
         extension = last_media["mime_type"].split("/")[-1]
         filename = f"{last_media['type']}.{extension}"
+        body = f"Attached {last_media['type']} from Telegram."
+        if fallback_body:
+            body = f"{body}\n\n{fallback_body}"
+        if extra_message:
+            body = f"{body}\n\n{extra_message}"
         ok, error = send_email(
-            "Chaperon Attachment",
-            f"Attached {last_media['type']} from Telegram.",
+            subject,
+            body,
+            to=to,
             attachment={"filename": filename, "mime_type": last_media["mime_type"], "data": file_bytes},
         )
         last_media = None
         send("Sent to email as an attachment." if ok else f"Failed to send email: {error}")
         return
 
-    if not last_bot_message:
+    body = extra_message or fallback_body
+    if not body:
         send("Nothing to send yet.")
         return
-    ok, error = send_email("Chaperon Message", last_bot_message)
+    ok, error = send_email(subject, body, to=to)
     send("Sent to email." if ok else f"Failed to send email: {error}")
+
+
+def send_command(parameters, update):
+    extra = " ".join(parameters) if parameters else ""
+    _do_send(NOTIFY_SUBJECT, NOTIFY_EMAIL, extra, NOTIFY_MESSAGE)
+
+
+def send_test_command(parameters, update):
+    extra = " ".join(parameters) if parameters else ""
+    _do_send(TEST_NOTIFY_SUBJECT, TEST_NOTIFY_EMAIL, extra, TEST_NOTIFY_MESSAGE)
 
 
 HELP_TEXT = (
@@ -323,12 +359,21 @@ HELP_TEXT = (
     "  Tells you how to share your location via Telegram's attachment menu.\n"
     "  Example: /location\n"
     "\n"
-    "/send\n"
-    "  No parameters.\n"
-    "  Emails the most recently shared voice message or photo as an\n"
-    "  attachment, or falls back to emailing the bot's last text reply\n"
-    "  if nothing's pending.\n"
-    "  Example: record a voice message, then /send\n"
+    "/send [message]\n"
+    "  Optional: extra text to include in the email.\n"
+    "  If media (location, voice, photo) is pending, emails it and appends\n"
+    "  the message text if provided. If nothing is pending, emails the\n"
+    "  message text directly, or falls back to the bot's last text reply.\n"
+    "  Uses notify_email and notify_subject from config.\n"
+    "  Example: /send  or  /send please call me\n"
+    "\n"
+    "/send-test [message]\n"
+    "  Optional: extra text to include in the email.\n"
+    "  Same as /send but uses test_notify_email, test_notify_subject, and\n"
+    "  test_notify_message from the config. If nothing is pending, emails\n"
+    "  the message text if provided, or falls back to test_notify_message.\n"
+    "  Useful for verifying email delivery without touching the real address.\n"
+    "  Example: /send-test  or  /send-test this is a test\n"
     "\n"
     "/help\n"
     "  No parameters.\n"
@@ -349,6 +394,7 @@ COMMANDS = {
     "@crontab": crontab,
     "/location": location,
     "/send": send_command,
+    "/send-test": send_test_command,
     "/help": help_command,
 }
 
@@ -398,7 +444,9 @@ while True:
         location_data = msg.get("location")
         if location_data:
             lat, lon = location_data.get("latitude"), location_data.get("longitude")
-            send(f"Location received: {lat}, {lon} -- https://maps.google.com/?q={lat},{lon}")
+            maps_link = f"Location received: {lat}, {lon} -- https://maps.google.com/?q={lat},{lon}"
+            last_media = {"type": "location", "text": maps_link}
+            send(f"{maps_link}\nType /send to email this location.")
             continue
 
         voice_data = msg.get("voice")
