@@ -1,3 +1,92 @@
+````markdown
+# Telegram Chaperon Bot
+
+## What is this?
+
+Chaperon is a personal safety and check-in system built around a Telegram bot running on a Raspberry Pi. The name comes from the old-fashioned idea of a chaperon -- someone who keeps an eye on you and raises the alarm if something seems wrong.
+
+The core idea is simple: at a scheduled time (or on demand), the bot sends a `?ok?` message to your Telegram chat. You reply with `y`, `yes`, `si`, or `1` to confirm you're fine. If you don't reply within a configurable window, the bot tries again. If you still don't reply after a configurable number of retries, it sends an email to a designated address -- a friend, a family member, a caregiver -- to let them know you haven't checked in.
+
+Beyond the check-in flow, the bot doubles as a general-purpose communication tool: you can send your GPS location, a photo, or a voice message from Telegram and have the bot forward it by email. You can also query the Pi's cron schedule, schedule ad-hoc check-ins at a specific time of day via a REST API, and run quick diagnostics like `/ping` to confirm the bot is alive.
+
+It is designed to run unattended on a Raspberry Pi with no screen attached, managed as a systemd service that restarts automatically if it crashes, and controlled entirely from your phone via Telegram.
+
+A small Telegram bot, built for running on a Raspberry Pi (or any always-on Linux box), that supports a handful of chat commands (see Chat commands below) plus a confirmation/check-in flow: it asks a yes/no question in the chat, waits for a reply, retries on silence, and emails you if nobody ever answers.
+
+It's made of three components:
+
+- **`telegram-bot.py`** -- the long-running service. Polls Telegram for incoming messages and runs the confirmation logic. Meant to run under systemd.
+- **`telegram-cron.py`** -- a one-shot trigger. Hits a local HTTP endpoint on the running bot to kick off the confirmation flow, without talking to Telegram itself. Meant to be run from cron, a systemd timer, or by hand.
+- **`chaperon-api.py`** -- a small FastAPI service exposing a REST API for scheduling ad-hoc confirmation checks at a specific time of day, instead of relying only on a fixed cron schedule.
+
+## How it works
+
+`telegram-bot.py` runs forever, long-polling Telegram's `getUpdates` API for new messages. When it sees `/ping` or `/echo`, it responds directly. When it sees `?ok?` typed into the chat -- or when `telegram-cron.py`, `chaperon-api.py`, or a bare `curl` hits its local trigger endpoint -- it posts `?ok?` into the chat and waits for someone to reply with one of `y`, `yes`, `si`, or `1`.
+
+If no recognized reply arrives within the configured wait window, the bot reports that, waits a bit, and tries again -- up to a configured maximum number of attempts. If it exhausts all retries with no confirmation, it sends a final notice in the chat and emails a configured address.
+
+Two of the chat commands -- `@check` and `@crontab` -- depend on `chaperon-api.py` also being up and running on the same Pi, since they make local HTTP requests to it. Everything else (`/ping`, `/echo`, `?ok?`, `/help`) works with `telegram-bot.py` alone.
+
+## Requirements
+
+- Python 3.6 or later (the code uses f-strings, which won't run on Python 2 -- if you hit a `SyntaxError` pointing at an f-string, you're almost certainly invoking `python` instead of `python3`)
+- The `requests` library: `pip3 install requests`
+- `fastapi` and `uvicorn`, only needed for `chaperon-api.py`: `pip3 install fastapi uvicorn`
+- A Telegram bot token and the numeric chat ID you want it to listen to
+- (Optional, for email notifications) an SMTP account that allows sending mail -- see the Email setup section below
+
+## Installation overview
+
+The short version, end to end -- each step is covered in more detail in its own section below:
+
+1. Install dependencies:
+
+   ```bash
+   pip3 install requests fastapi uvicorn
+   ```
+
+   (`fastapi` pulls in `pydantic` automatically -- no separate install needed. `uvicorn` and `fastapi` are only used by `chaperon-api.py`; `telegram-bot.py` and `telegram-cron.py` only need `requests`.)
+
+2. Set up the Telegram bot via @BotFather and write `telegram-bot.ini` (see "Setting up the Telegram bot" and "Configuration file" below).
+3. Copy `telegram-bot.py` to `/home/pi/telegram-bot/` and `chaperon-api.py` to `/home/pi/chaperon-api/` (or wherever you prefer -- just make sure the paths in the `.ini` file and the systemd unit files below match wherever you actually put things).
+4. Install and start both systemd services:
+
+   ```bash
+   sudo cp telegram-bot.service chaperon-api.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable telegram-bot.service chaperon-api.service
+   sudo systemctl start telegram-bot.service chaperon-api.service
+   ```
+
+5. Confirm both are running:
+
+   ```bash
+   sudo systemctl status telegram-bot.service chaperon-api.service
+   ```
+
+6. Test from Telegram by sending `/help` to the bot -- it should list every available command. Try `/ping` next, then `@check` once `chaperon-api.py` is confirmed running, to verify the two services can actually talk to each other.
+
+The full contents of both `.service` files, plus notes on the `-u` flag and the `TZ` environment variable, are in "Running `telegram-bot.py` as a service" and "Running `chaperon-api.py` as a service" further down.
+
+## Setting up the Telegram bot
+
+1. In Telegram, message [@BotFather](https://t.me/BotFather) and run `/newbot`. Follow the prompts to name it; you'll get back a token that looks like `123456789:AAExampleTokenStringHere`.
+2. Send any message to your new bot from the Telegram account you want it to listen to.
+3. Find your chat ID by fetching pending updates with curl, using the token from step 1:
+
+   ```bash
+   curl https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
+   ```
+
+   The response includes a `"chat":{"id": ...}` field -- that number is your `chat_id`.
+4. Sanity-check the token at any point with:
+
+   ```bash
+   curl https://api.telegram.org/bot<YOUR_TOKEN>/getMe
+   ```
+
+   A working token returns `{"ok":true,"result":{"username":"YourBotName",...}}`. A `404` usually means the token itself is wrong or wasn't substituted into the URL correctly.
+
 ## Configuration file
 
 Both the token/chat ID and the bot's behavior are controlled by an `.ini` file that `telegram-bot.py` reads at startup. By default it expects this at `/home/pi/telegram-bot/telegram-bot.ini` -- edit the `config.read(...)` path near the top of the script if you want it elsewhere.
@@ -45,7 +134,134 @@ smtp_password = your_app_password
 
 Every key here is read directly with no fallback -- if one is missing or misspelled, the bot will fail to start with a `KeyError`, which will show up immediately in the logs (see Troubleshooting below).
 
----
+### A note on Gmail as the sender
+
+If `smtp_username` is a Gmail address, regular password authentication won't work over SMTP. You'll need to enable 2-Step Verification on that Google account, then generate an App Password at <https://myaccount.google.com/apppasswords> and use that 16-character value as `smtp_password`. Any other SMTP provider just needs its own server/port/credentials in the same four fields.
+
+## Running `telegram-bot.py` as a service
+
+Running it under systemd keeps it alive across reboots and restarts it automatically if it crashes. Create `/etc/systemd/system/telegram-bot.service`:
+
+```ini
+[Unit]
+Description=Telegram Bot
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -u /home/pi/telegram-bot/telegram-bot.py
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The `-u` flag matters -- without it, Python buffers stdout when it isn't connected to a terminal, which means anything the script prints won't show up in the logs until the buffer flushes, making it look like nothing is happening even when it is.
+
+Enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable telegram-bot.service
+sudo systemctl start telegram-bot.service
+```
+
+Watch it run with:
+
+```bash
+sudo journalctl -u telegram-bot.service -f
+```
+
+## Using `telegram-cron.py`
+
+This script needs no config file and no Telegram credentials -- it just makes a local HTTP request to the already-running bot:
+
+```bash
+python3 telegram-cron.py
+```
+
+or, equivalently, skip the script entirely and run:
+
+```bash
+curl http://127.0.0.1:8765/ok-trigger
+```
+
+Either one starts the same confirmation flow as if you'd typed `?ok?` into the chat yourself. This is meant to be scheduled -- via `crontab -e` or a systemd timer -- to trigger periodic check-ins automatically.
+
+Note that the endpoint is bound to `127.0.0.1` only, so it can't be triggered from outside the Pi itself; that's intentional.
+
+## Using `chaperon-api.py`
+
+While `telegram-cron.py` is good for a fixed, recurring schedule, `chaperon-api.py` lets you schedule a one-off confirmation check for a specific time today, on demand, via a REST API. It doesn't talk to Telegram directly either -- like `telegram-cron.py`, it just hits `telegram-bot.py`'s local `127.0.0.1:8765/ok-trigger` endpoint once the scheduled time arrives.
+
+Run it directly with:
+
+```bash
+python3 chaperon-api.py
+```
+
+It listens on port `8001` by default. Schedule a check with a `POST` request specifying `hour` (0-23) and `minute` (0-59):
+
+```bash
+curl -X POST http://localhost:8001/checks -H "Content-Type: application/json" -d '{"hour": 15, "minute": 30}'
+```
+
+A successful response looks like:
+
+```json
+{"id": "b7f56fa6-d128-445d-8661-60947e2554d9", "scheduled_for": "2026-06-21T15:30:00", "seconds_from_now": 932}
+```
+
+If the requested time has already passed today, you'll get a `400` instead, with the server's current time included so you can tell at a glance whether the request was just made too late or whether something's actually wrong with the server's clock:
+
+```json
+{"detail": "15:30 has already passed today (current server time is 15:31:02)."}
+```
+
+Interactive API docs are available for free at `http://<pi-ip>:8001/docs` once it's running, useful for testing without curl.
+
+There's also a `GET /crontab` endpoint that returns the crontab of whatever user the service runs as (per the systemd unit below, that's `pi`):
+
+```bash
+curl http://localhost:8001/crontab
+```
+
+```json
+{"crontab": "*/5 * * * * /home/pi/telegram-cron/telegram-cron.py\n"}
+```
+
+If no crontab has been set up for that user yet, you'll get an empty `crontab` field with an explanatory `message` instead. Note this endpoint has no authentication -- since the API binds to `0.0.0.0`, anything that can reach port `8001` on your network can read the crontab contents. That's read-only and low-risk on a home LAN, but worth knowing if this box is ever exposed beyond it.
+
+### Running `chaperon-api.py` as a service
+
+Same idea as `telegram-bot.service`. Create `/etc/systemd/system/chaperon-api.service`:
+
+```ini
+[Unit]
+Description=Chaperon API
+After=network.target
+
+[Service]
+Environment=TZ=America/Los_Angeles
+WorkingDirectory=/home/pi/chaperon-api
+ExecStart=/usr/bin/python3 -u /home/pi/chaperon-api/chaperon-api.py
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The explicit `Environment=TZ=...` matters here: `chaperon-api.py` computes "is this time today still in the future" using the process's local time, and if the environment that starts it doesn't carry the timezone you expect, that comparison will silently use the wrong reference point -- set it to whichever IANA timezone (e.g. `America/Los_Angeles`, `America/New_York`) matches where the Pi actually is.
+
+Enable and start it the same way:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable chaperon-api.service
+sudo systemctl start chaperon-api.service
+sudo journalctl -u chaperon-api.service -f
+```
 
 ## Chat commands
 
@@ -92,3 +308,43 @@ If `@check` or `@crontab` come back with `"Could not reach chaperon-api: ..."`, 
 3. Useful for confirming SMTP credentials and delivery before relying on `/send` for real notifications.
 
 Note: Telegram's Bot API caps file downloads at 20 MB -- a very long voice message or an unusually large photo will fail at the download step with an error message in the chat. For normal voice memos and phone photos this limit is rarely hit in practice.
+
+## Troubleshooting
+
+A few issues that come up commonly with this kind of setup:
+
+**`SyntaxError` pointing at an f-string.** You're running it with Python 2. Use `python3` explicitly, or add a `#!/usr/bin/env python3` shebang and `chmod +x` the file.
+
+**`KeyError` on a config value.** `configparser.read()` doesn't raise an error if the file is missing -- it just silently parses nothing. Check the path is correct and the file is readable: `config.read("path")` returns a list of files it actually parsed, which will be empty if something's wrong.
+
+**Nothing happens when you trigger `?ok?`, with no errors anywhere.** This is the trickiest failure mode, because several different things produce identical symptoms:
+
+- Two copies of `telegram-bot.py` running at once will silently conflict over the same long-poll connection. Check with `ps aux | grep telegram-bot.py` and make sure only one instance is alive.
+- The token in your config might not match the bot you think it does. Verify with the `getMe` curl command shown above.
+- If you're trying to make the bot react to a message that *it itself* sent via the API, that will never work -- Telegram's `getUpdates` only returns events happening *to* a bot (messages from users, etc.), never the bot's own outgoing messages. This is the reason this project uses the local HTTP trigger instead of having a separate script send a Telegram message for the bot to "notice."
+
+**Editing the script doesn't seem to change its behavior.** If it's running as a systemd service, you need to restart it after every edit (`sudo systemctl restart telegram-bot.service`) -- Python doesn't reload source files on its own.
+
+**`chaperon-api.py` rejects a time as "already passed" when it clearly hasn't.** This usually isn't a logic bug -- it's that the process computing `datetime.now()` doesn't have the timezone you think it does. This can happen if the process was started from a different terminal session, login shell, or service environment than the one you're checking the time from. Compare `python3 -c "from datetime import datetime; print(datetime.now())"` run in the same environment that started the process against `date`; if they disagree, restart the process from an environment with the correct `TZ`, or set it explicitly (see the systemd section above).
+
+**`@check` or `@crontab` reply with "Could not reach chaperon-api".** These two commands work by making an HTTP request from `telegram-bot.py` to `chaperon-api.py` on `localhost:8001` -- if that service isn't running, isn't listening on that port, or crashed, this is exactly what you'll see. Check `sudo systemctl status chaperon-api.service` and `sudo journalctl -u chaperon-api.service -f`.
+
+## File layout
+
+```
+telegram-bot/
+├── telegram-bot.py       # the long-running service
+├── telegram-bot.ini      # config (not checked in -- contains your token/credentials)
+└── README.md
+
+telegram-cron/
+└── telegram-cron.py       # one-shot trigger, run from cron
+
+chaperon-api/
+└── chaperon-api.py        # REST API for scheduling ad-hoc checks and reading the crontab
+```
+
+`telegram-bot.service` and `chaperon-api.service` aren't part of either project directory -- they get copied into `/etc/systemd/system/` directly, per the installation steps above.
+
+Keep `telegram-bot.ini` out of version control -- it holds your bot token and SMTP password.
+````
