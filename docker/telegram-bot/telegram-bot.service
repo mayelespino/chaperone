@@ -1,0 +1,13 @@
+# /etc/systemd/system/telegram-bot.service
+[Unit]
+Description=Telegram Bot
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/telegram-bot/telegram-bot.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

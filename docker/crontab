@@ -1,0 +1,3 @@
+# Chaperon check-in schedule
+# Runs the ?ok? trigger Monday through Friday at 9:00 AM
+0 9 * * 1-5 root python3 /app/telegram-cron.py >> /proc/1/fd/1 2>&1
