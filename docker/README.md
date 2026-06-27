@@ -36,10 +36,10 @@ For full documentation on commands, configuration keys, the confirmation flow, a
 
 ## Building the image
 
-From the `docker/` directory:
+From the `chaperone/` directory:
 
 ```bash
-docker build -t chaperon .
+docker build --no-cache -f docker/Dockerfile -t chaperon .
 ```
 
 ---
