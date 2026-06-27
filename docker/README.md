@@ -161,6 +161,11 @@ config.read("/app/telegram-bot.ini")
 This is the only code change required between the standalone and Docker versions, and it only affects the config path, not any logic.
 
 
-**Pulling from Docker Hub**
+---
+# Pulling from Docker Hub
 
-Instead of building the image yourself, you can pull a pre-built image directly from Docker Hub. Run `docker pull mayelespino/chaperon:latest` to get the latest version, then start the container with `docker run -d --name chaperon --restart unless-stopped -e TZ=America/Los_Angeles -v /path/to/telegram-bot.ini:/app/telegram-bot.ini:ro -p 8001:8001 mayelespino/chaperon:latest`. The only file you need on your machine is a correctly configured `telegram-bot.ini` -- the image itself contains no credentials. Replace `/path/to/telegram-bot.ini` with the actual path to your config file, and adjust the `TZ` value to match your timezone. See the Configuration section in `standalone/README.md` for how to create the `.ini` file if you haven't done so already.
+Instead of building the image yourself, you can pull a pre-built image directly from Docker Hub. Run `docker pull mayelespino/chaperon:latest` to get the latest version,then start the container with `docker run -d --name chaperon --restart unless-stopped -e TZ=America/Los_Angeles -v /path/to/telegram-bot.ini:/app/telegram-bot.ini:ro -p 8001:8001 mayelespino/chaperon:latest`. 
+
+The only file you need on your machine is a correctly configured `telegram-bot.ini` -- the image itself contains no credentials. 
+
+Replace `/path/to/telegram-bot.ini` with the actual path to your config file, and adjust the `TZ` value to match your timezone. See the Configuration section in `standalone/README.md` for how to create the `.ini` file if you haven't done so already.
