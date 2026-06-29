@@ -64,3 +64,8 @@ Use **`docker/`** if:
 - You want a self-contained deployment that doesn't touch the host's systemd or cron
 - You are comfortable with Docker and want to manage it alongside other containers
 - You want to be able to move the deployment to a different machine without reinstalling anything
+
+----
+# Screenshots
+![aperone](chapi-01.PNG)
+
