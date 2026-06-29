@@ -67,5 +67,4 @@ Use **`docker/`** if:
 
 ----
 # Screenshots
-![aperone](chapi-01.PNG)
-
+![aperone](./chapi-1.PNG)
